@@ -107,10 +107,20 @@ def init_db():
     conn.commit()
     conn.close()
 
+# Helper function to sanitize the waived string to guarantee 'Yes' or 'No'
+def clean_waived_status(val):
+    val_str = str(val).strip().capitalize()
+    if val_str in ['Yes', 'Y', 'True', '1']:
+        return 'Yes'
+    return 'No'
+
 # Helper function to insert a single record into the DB
 def insert_biosimilar_record(generic_name, drug_class, brand_name, reference_product, company_name, approval_year, indications, cdsco_link, analytical, non_clinical, pk_pd, phase_3, waived, waiver_basis, ema_status, usfda_status):
     conn = sqlite3.connect("biosimilar_kb.db")
     cursor = conn.cursor()
+
+    # Normalize 'waived' column value to prevent CHECK constraint failures
+    clean_waived = clean_waived_status(waived)
 
     cursor.execute("INSERT OR IGNORE INTO molecules (generic_name, drug_class) VALUES (?, ?)", (generic_name, drug_class))
     cursor.execute("SELECT molecule_id FROM molecules WHERE generic_name = ?", (generic_name,))
@@ -129,7 +139,7 @@ def insert_biosimilar_record(generic_name, drug_class, brand_name, reference_pro
     cursor.execute("""
         INSERT INTO evidence (biosimilar_id, analytical_evidence, non_clinical_evidence, pk_pd_evidence, phase_3_evidence, clinical_trials_waived, waiver_basis)
         VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (biosimilar_id, analytical, non_clinical, pk_pd, phase_3, waived, waiver_basis))
+    """, (biosimilar_id, analytical, non_clinical, pk_pd, phase_3, clean_waived, waiver_basis))
 
     cursor.execute("""
         INSERT INTO regulatory_comparison (molecule_id, cdsco_status, ema_status, usfda_status, fda_purple_book_link)
@@ -173,126 +183,24 @@ if choice == "📊 Dashboard & Timeline":
         col2.metric("Molecules Tracked", df['generic_name'].nunique())
 
         st.subheader("Approval Timeline Visualizer")
-        fig = px.scatter(
-            df, 
-            x="approval_year", 
-            y="generic_name", 
-            color="company_name",
-            hover_name="brand_name",
-            title="Timeline of Approved Biosimilars in India per Molecule",
-            labels={"approval_year": "Year of Approval", "generic_name": "Molecule"}
-        )
-        fig.update_traces(marker=dict(size=14))
-        st.plotly_chart(fig, use_container_width=True)
+        fig =This error happens because the `clinical_trials_waived` column in the SQLite database has a strict SQL CHECK constraint that **only** allows exact strings: `'Yes'` or `'No'`. 
 
-        st.subheader("Data Summary")
-        st.dataframe(df, use_container_width=True)
+If your CSV has values like `'yes'`, `'no'`, `'TRUE'`, `'FALSE'`, or blank cells, SQLite rejects the entry.
 
-# --- TAB 2: BROWSE & QUERY DATABASE ---
-elif choice == "🔍 Browse & Query Database":
-    st.header("Detailed Biosimilar Records & Evidence")
-    
-    conn = sqlite3.connect("biosimilar_kb.db")
-    query = """
-    SELECT 
-        b.brand_name AS 'Brand Name',
-        m.generic_name AS 'Generic Molecule',
-        m.drug_class AS 'Drug Class',
-        mf.company_name AS 'Manufacturer',
-        b.reference_product AS 'Reference Product',
-        b.approval_year AS 'Approval Year',
-        b.indications AS 'Indications Granted',
-        e.analytical_evidence AS 'Analytical Evidence',
-        e.non_clinical_evidence AS 'Non-Clinical Evidence',
-        e.pk_pd_evidence AS 'PK/PD Evidence',
-        e.phase_3_evidence AS 'Phase III Evidence',
-        e.clinical_trials_waived AS 'Clinical Study Waived?',
-        e.waiver_basis AS 'Waiver Basis',
-        b.cdsco_link AS 'CDSCO Link'
-    FROM biosimilars b
-    JOIN molecules m ON b.molecule_id = m.molecule_id
-    JOIN manufacturers mf ON b.manufacturer_id = mf.manufacturer_id
-    LEFT JOIN evidence e ON b.biosimilar_id = e.biosimilar_id
-    """
-    full_df = pd.read_sql_query(query, conn)
-    conn.close()
+---
 
-    search_term = st.text_input("Filter by Generic Name or Brand Name:", "")
-    if search_term:
-        filtered_df = full_df[
-            full_df['Generic Molecule'].str.contains(search_term, case=False) | 
-            full_df['Brand Name'].str.contains(search_term, case=False)
-        ]
-    else:
-        filtered_df = full_df
+### Fixed CSV Code Section
 
-    st.dataframe(filtered_df, use_container_width=True)
+Here is the updated **"📁 Upload CSV Data"** section of your Streamlit code. It automatically cleans and converts `Yes`/`No` values (including `true`, `false`, `1`, `0`, and lowercase text) before saving them to the database so the constraint never fails again.
 
-# --- TAB 3: REGULATORY COMPARISON ---
-elif choice == "⚖️ Regulatory Comparison (EMA / FDA)":
-    st.header("Side-by-Side Global Regulatory Comparison")
-    st.caption("Cross-comparing Indian CDSCO approvals against EMA (Europe) and US FDA Purple Book records.")
+Replace your **Tab 5 (`choice == "📁 Upload CSV Data"`)** code with this:
 
-    conn = sqlite3.connect("biosimilar_kb.db")
-    comp_df = pd.read_sql_query("""
-        SELECT 
-            m.generic_name AS 'Molecule Name',
-            rc.cdsco_status AS 'India (CDSCO)',
-            rc.ema_status AS 'Europe (EMA)',
-            rc.usfda_status AS 'USA (US FDA)',
-            rc.fda_purple_book_link AS 'FDA Purple Book Link'
-        FROM regulatory_comparison rc
-        JOIN molecules m ON rc.molecule_id = m.molecule_id
-    """, conn)
-    conn.close()
-
-    st.table(comp_df)
-
-# --- TAB 4: ADD NEW ENTRY FORM ---
-elif choice == "➕ Add New Entry":
-    st.header("Add New Biosimilar Record")
-
-    with st.form("biosimilar_form"):
-        col1, col2 = st.columns(2)
-        with col1:
-            generic_name = st.text_input("Molecule Generic Name")
-            drug_class = st.text_input("Drug Class (e.g., Monoclonal Antibody)")
-            brand_name = st.text_input("Brand Name in India")
-            reference_product = st.text_input("Reference Product")
-            company_name = st.text_input("Manufacturer Name")
-            approval_year = st.number_input("Approval Year", min_value=1990, max_value=2030, value=2024)
-            indications = st.text_area("Approved Indications")
-            cdsco_link = st.text_input("CDSCO Official Link", "https://cdsco.gov.in")
-
-        with col2:
-            st.write("**Comparability Evidence**")
-            analytical = st.text_area("Analytical Evidence")
-            non_clinical = st.text_area("Non-Clinical Evidence")
-            pk_pd = st.text_area("PK/PD Evidence")
-            phase_3 = st.text_area("Phase III Evidence")
-            waived = st.selectbox("Clinical Trial Waived?", ["No", "Yes"])
-            waiver_basis = st.text_input("Waiver Basis (If Applicable)", "N/A")
-
-            st.write("**Global Approvals**")
-            ema_status = st.text_input("EMA Status", "Approved")
-            usfda_status = st.text_input("US FDA Status", "Approved")
-
-        submitted = st.form_submit_button("Save Record to Database")
-
-        if submitted:
-            insert_biosimilar_record(
-                generic_name, drug_class, brand_name, reference_product, company_name, 
-                approval_year, indications, cdsco_link, analytical, non_clinical, 
-                pk_pd, phase_3, waived, waiver_basis, ema_status, usfda_status
-            )
-            st.success("Record successfully saved to the SQLite database!")
-
+```python
 # --- TAB 5: UPLOAD CSV DIRECTLY TO DATABASE ---
 elif choice == "📁 Upload CSV Data":
     st.header("Upload CSV File to Database")
     st.write("Upload a CSV file to bulk-import biosimilar entries directly into the database.")
 
-    # CSV Format Guidelines
     with st.expander("ℹ️ Click to view required CSV Format & Columns"):
         st.write("Your CSV file should include the following column headers:")
         st.code("""generic_name,drug_class,brand_name,reference_product,company_name,approval_year,indications,cdsco_link,analytical_evidence,non_clinical_evidence,pk_pd_evidence,phase_3_evidence,clinical_trials_waived,waiver_basis,ema_status,usfda_status""")
@@ -308,6 +216,17 @@ elif choice == "📁 Upload CSV Data":
             if st.button("Import Data into Database"):
                 records_inserted = 0
                 for _, row in csv_df.iterrows():
+                    # Sanitize 'clinical_trials_waived' to strictly match SQLite 'Yes' / 'No' constraint
+                    raw_waived = str(row.get('clinical_trials_waived', 'No')).strip().capitalize()
+                    if raw_waived in ['True', '1', 'Y']:
+                        waived_val = 'Yes'
+                    elif raw_waived in ['False', '0', 'N']:
+                        waived_val = 'No'
+                    elif raw_waived in ['Yes', 'No']:
+                        waived_val = raw_waived
+                    else:
+                        waived_val = 'No'
+
                     insert_biosimilar_record(
                         generic_name=str(row.get('generic_name', 'Unknown')),
                         drug_class=str(row.get('drug_class', 'Monoclonal Antibody')),
@@ -316,12 +235,12 @@ elif choice == "📁 Upload CSV Data":
                         company_name=str(row.get('company_name', 'Unknown')),
                         approval_year=int(row.get('approval_year', 2024)),
                         indications=str(row.get('indications', 'N/A')),
-                        cdsco_link=str(row.get('cdsco_link', 'https://cdsco.gov.in')),
+                        cdsco_link=str(row.get('cdsco_link', '[https://cdsco.gov.in](https://cdsco.gov.in)')),
                         analytical=str(row.get('analytical_evidence', 'Submitted')),
                         non_clinical=str(row.get('non_clinical_evidence', 'Submitted')),
                         pk_pd=str(row.get('pk_pd_evidence', 'Submitted')),
                         phase_3=str(row.get('phase_3_evidence', 'Submitted')),
-                        waived=str(row.get('clinical_trials_waived', 'No')),
+                        waived=waived_val,
                         waiver_basis=str(row.get('waiver_basis', 'N/A')),
                         ema_status=str(row.get('ema_status', 'Approved')),
                         usfda_status=str(row.get('usfda_status', 'Approved'))
